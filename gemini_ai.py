@@ -1,6 +1,6 @@
 """
-gemini_ai.py — Google Gemini API integration for AI Business Intelligence App
-Provides dataset analysis, prediction interpretation, and batch summaries.
+gemini_ai.py — Intégration API Google Gemini pour plateforme IA Business Intelligence
+Fournit analyse de datasets, interprétation de prédictions et résumés batch.
 """
 
 from __future__ import annotations
@@ -15,22 +15,22 @@ from logger import log_action
 
 
 def _get_client():
-    """Return a configured Gemini GenerativeModel instance."""
+    """Retourne une instance GenerativeModel Gemini configurée."""
     try:
         import google.generativeai as genai
         genai.configure(api_key=GOOGLE_API_KEY)
         return genai.GenerativeModel("gemini-1.5-flash")
     except ImportError:
         raise RuntimeError(
-            "google-generativeai is not installed. "
-            "Run: pip install google-generativeai"
+            "google-generativeai n'est pas installé. "
+            "Exécutez: pip install google-generativeai"
         )
     except Exception as e:
-        raise RuntimeError(f"Failed to initialise Gemini: {e}")
+        raise RuntimeError(f"Échec d'initialisation de Gemini: {e}")
 
 
 def _safe_generate(prompt: str, label: str = "gemini_query") -> str:
-    """Call Gemini and return the text response, with error handling."""
+    """Appelle Gemini et retourne la réponse texte, avec gestion d'erreur."""
     try:
         model = _get_client()
         response = model.generate_content(prompt)
@@ -39,7 +39,199 @@ def _safe_generate(prompt: str, label: str = "gemini_query") -> str:
         return text
     except Exception as e:
         log_action("gemini_query", {"label": label, "error": str(e)}, status="error")
-        return f"⚠️ Gemini API error: {e}"
+        return f"⚠️ Erreur API Gemini: {e}"
+
+
+# ── Analyse du dataset ────────────────────────────────────────────────────────
+
+def analyse_dataset(
+    df: pd.DataFrame,
+    dataset_label: str,
+    target: str,
+    task: str,
+    user_question: str = "",
+) -> str:
+    """
+    Génère une analyse IA du dataset.
+    Si user_question est fourni, répond à la question en contexte du dataset.
+    """
+    # Construire un résumé statistique compact
+    n_rows, n_cols = df.shape
+    numeric_stats = df.describe().round(2).to_string()
+    null_counts = df.isnull().sum()[df.isnull().sum() > 0].to_dict()
+    cat_cols = df.select_dtypes(include="object").columns.tolist()
+    cat_summary = {
+        col: df[col].value_counts().head(5).to_dict() for col in cat_cols[:4]
+    }
+    target_summary = df[target].describe().round(2).to_dict() if task == "regression" else df[target].value_counts().to_dict()
+
+    context = f"""
+Vous êtes un scientifique des données senior analysant le dataset "{dataset_label}" pour une plateforme de business intelligence.
+
+Vue d'ensemble du dataset:
+- Dimensions: {n_rows} lignes × {n_cols} colonnes
+- Type de tâche: {task}
+- Variable cible: {target}
+- Distribution cible: {json.dumps(target_summary, default=str)}
+- Valeurs manquantes: {json.dumps(null_counts) if null_counts else "Aucune"}
+- Colonnes catégoriques: {cat_cols}
+- Exemples de valeurs catégoriques: {json.dumps(cat_summary, default=str)}
+
+Statistiques numériques:
+{numeric_stats}
+""".strip()
+
+    if user_question:
+        prompt = f"""{context}
+
+Question de l'utilisateur: {user_question}
+
+Veuillez fournir une réponse claire, perspicace et orientée métier. Utilisez des puces où utile. Soyez concis mais complet (max 400 mots).
+"""
+    else:
+        prompt = f"""{context}
+
+Fournissez une analyse de business intelligence structurée couvrant:
+1. **Vue d'ensemble du dataset** — ce que représentent les données et leur valeur métier
+2. **Principaux motifs et insights** — distributions remarquables, corrélations ou anomalies
+3. **Analyse de la variable cible** — équilibre des classes (classification) ou distribution (régression)
+4. **Recommandations** — quels modèles ML pourraient fonctionner au mieux et pourquoi
+5. **Implications métier** — quelles décisions pourraient être améliorées avec ce dataset
+
+Gardez la réponse professionnelle, concise et actionnable (max 500 mots).
+"""
+
+    return _safe_generate(prompt, label=f"dataset_analysis_{dataset_label}")
+
+
+# ── Interprétation de prédiction ──────────────────────────────────────────────
+
+def interpret_prediction(
+    dataset_label: str,
+    task: str,
+    target: str,
+    input_data: Dict[str, Any],
+    prediction_result: Dict[str, Any],
+    model_name: str = "Modèle Champion",
+) -> str:
+    """Génère une explication en langage naturel d'une prédiction unique."""
+    pred = prediction_result.get("prediction")
+    prob = prediction_result.get("probability")
+    class_probs = prediction_result.get("class_probabilities", {})
+
+    if task == "classification":
+        pred_line = f"Classe prédite: {int(pred)} (confiance: {prob:.1%})" if prob else f"Classe prédite: {int(pred)}"
+        prob_detail = f"Probabilités des classes: {json.dumps({k: f'{v:.1%}' for k, v in class_probs.items()})}" if class_probs else ""
+    else:
+        pred_line = f"Prédiction {target}: {pred:,.2f}"
+        prob_detail = ""
+
+    prompt = f"""Vous êtes un assistant IA expliquant une prédiction machine learning à un utilisateur métier.
+
+Dataset: {dataset_label}
+Modèle utilisé: {model_name}
+Tâche: {task}
+Cible: {target}
+
+Caractéristiques saisies:
+{json.dumps(input_data, indent=2, default=str)}
+
+Résultat de la prédiction:
+- {pred_line}
+{prob_detail}
+
+Veuillez expliquer:
+1. Ce que cette prédiction signifie en langage métier simple
+2. Quelles caractéristiques d'entrée ont probablement eu le plus d'influence (basé sur leurs valeurs)
+3. Quelle action le métier devrait envisager basé sur ce résultat
+4. Toute mise en garde ou limitation à garder à l'esprit
+
+Gardez-le concis et sans jargon (max 300 mots).
+"""
+    return _safe_generate(prompt, label=f"prediction_interpretation_{dataset_label}")
+
+
+# ── Résumé batch ──────────────────────────────────────────────────────────────
+
+def summarise_batch_predictions(
+    dataset_label: str,
+    task: str,
+    target: str,
+    df_results: pd.DataFrame,
+) -> str:
+    """Génère un résumé de haut niveau des résultats de prédiction batch."""
+    n = len(df_results)
+    preds = df_results["prediction"]
+
+    if task == "classification":
+        dist = preds.value_counts().to_dict()
+        stats_str = f"Distribution des classes: {dist}"
+        if "confidence" in df_results.columns:
+            avg_conf = df_results["confidence"].mean()
+            stats_str += f" | Confiance moyenne: {avg_conf:.1%}"
+    else:
+        stats_str = (
+            f"Moyenne: {preds.mean():,.2f} | "
+            f"Min: {preds.min():,.2f} | "
+            f"Max: {preds.max():,.2f} | "
+            f"Écart-type: {preds.std():,.2f}"
+        )
+
+    prompt = f"""Vous êtes un analyste de données résumant les prédictions batch ML pour un rapport métier.
+
+Dataset: {dataset_label}
+Tâche: {task}
+Cible: {target}
+Nombre total d'enregistrements traités: {n}
+Statistiques de prédiction: {stats_str}
+
+Veuillez fournir:
+1. **Résumé exécutif** — ce que les résultats batch nous disent d'un coup d'œil
+2. **Principales conclusions** — les chiffres les plus importants et leur signification
+3. **Recommandations métier** — actions concrètes à entreprendre basées sur ces prédictions
+4. **Zones à risque ou attention** — enregistrements ou motifs nécessitant un suivi
+
+Gardez-le professionnel et actionnable (max 350 mots).
+"""
+    return _safe_generate(prompt, label=f"batch_summary_{dataset_label}")
+
+
+# ── Chat libre sur le dataset ─────────────────────────────────────────────────
+
+def chat_about_data(
+    dataset_label: str,
+    df: pd.DataFrame,
+    target: str,
+    task: str,
+    conversation_history: list,
+    user_message: str,
+) -> str:
+    """Répond à une question libre de l'utilisateur avec contexte du dataset."""
+    sample = df.sample(min(5, len(df)), random_state=42).to_string(index=False)
+    schema = {col: str(dtype) for col, dtype in df.dtypes.items()}
+
+    history_text = ""
+    for turn in conversation_history[-6:]:  # garder les 6 derniers tours pour le contexte
+        role = turn.get("role", "user")
+        content = turn.get("content", "")
+        history_text += f"\n{role.upper()}: {content}"
+
+    prompt = f"""Vous êtes un expert scientifique des données et analyste métier aidant un utilisateur à explorer le dataset "{dataset_label}".
+
+Schéma du dataset: {json.dumps(schema)}
+Cible: {target} ({task})
+Exemples de lignes:
+{sample}
+
+Conversation jusqu'à présent:{history_text}
+
+UTILISATEUR: {user_message}
+
+Répondez utilement, en utilisant des exemples spécifiques au dataset le cas échéant. 
+Si on vous demande de calculer des statistiques, raisonnez à partir de l'exemple et du schéma plutôt que d'inventer des nombres.
+Soyez concis (max 350 mots).
+"""
+    return _safe_generate(prompt, label=f"chat_{dataset_label}")
 
 
 # ── Dataset analysis ──────────────────────────────────────────────────────────
